@@ -248,13 +248,14 @@ async function handleCheckoutWebhook(checkout, topic) {
   console.log("Received Shopify checkout webhook", {
     topic,
     checkout_id: checkout.id,
+    checkout_key: getCheckoutKey(checkout),
     has_phone: Boolean(checkout.phone || checkout.shipping_address?.phone || checkout.billing_address?.phone),
     completed_at: checkout.completed_at || null,
     total_price: checkout.total_price || checkout.total_line_items_price || null
   });
 
   const queue = await loadQueue();
-  const checkoutKey = String(checkout.id || checkout.token);
+  const checkoutKey = getCheckoutKey(checkout);
   const taskId = `shopify-checkout-${checkoutKey}-reminder-1`;
   const existing = queue.tasks.find((task) => task.id === taskId);
 
@@ -318,7 +319,7 @@ function buildAbandonedCheckoutTask(checkout) {
   if (!phone) return null;
   if (!checkout.abandoned_checkout_url) return null;
 
-  const checkoutKey = String(checkout.id || checkout.token);
+  const checkoutKey = getCheckoutKey(checkout);
   const recoveryToken = crypto.randomBytes(16).toString("hex");
   const customerName =
     checkout.shipping_address?.first_name ||
@@ -346,6 +347,17 @@ function buildAbandonedCheckoutTask(checkout) {
     status: "pending",
     created_at: new Date().toISOString()
   };
+}
+
+function getCheckoutKey(checkout) {
+  const stableValue =
+    checkout.id ||
+    checkout.token ||
+    checkout.cart_token ||
+    checkout.abandoned_checkout_url ||
+    `${checkout.email || ""}:${checkout.total_price || ""}`;
+
+  return crypto.createHash("sha256").update(String(stableValue)).digest("hex").slice(0, 24);
 }
 
 function getCheckoutSkipReason(checkout) {
