@@ -41,10 +41,27 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/webhooks/shopify/orders-fulfilled") {
       const rawBody = await readRawBody(req);
       if (!isValidShopifyWebhook(req, rawBody)) {
+        console.error("Rejected Shopify webhook", {
+          topic: req.headers["x-shopify-topic"],
+          reason: "invalid_signature",
+          body_size: rawBody.length
+        });
         return json(res, 401, { error: "Invalid Shopify webhook signature" });
       }
 
       const order = JSON.parse(rawBody.toString("utf8"));
+      console.log("Received Shopify webhook", {
+        topic: req.headers["x-shopify-topic"],
+        order_id: order.id,
+        has_phone: Boolean(
+          order.shipping_address?.phone ||
+            order.billing_address?.phone ||
+            order.customer?.phone ||
+            order.phone
+        ),
+        line_items: order.line_items?.length || 0,
+        fulfillment_status: order.fulfillment_status
+      });
       const task = buildReviewRequestTask(order);
 
       if (!task) {
