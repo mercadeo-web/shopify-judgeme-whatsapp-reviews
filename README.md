@@ -93,7 +93,7 @@ WhatsApp exige consentimiento/opt-in del cliente para mensajes iniciados por el 
 
 ## Carrito/pedido abandonado
 
-La misma app puede recibir webhooks de `Checkout update` desde Shopify y enviar una plantilla de WhatsApp con un boton para recuperar la compra.
+La misma app puede recibir webhooks de `Checkout update` desde Shopify y enviar una plantilla de WhatsApp con un boton para recuperar la compra. El primer mensaje se agenda 20 minutos despues del abandono. Si el cliente no completa el pago, se agenda un segundo recordatorio 24 horas despues del primer mensaje.
 
 Webhook:
 
@@ -122,3 +122,14 @@ Variables:
 1. Nombre del cliente.
 2. Valor del pedido.
 3. Boton: token interno de recuperacion.
+
+Variables de tiempo:
+
+```env
+ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES=20
+ABANDONED_CHECKOUT_SECOND_ENABLED=true
+ABANDONED_CHECKOUT_SECOND_DELAY_HOURS=24
+ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME=checkout_abandonado
+```
+
+Para usar un segundo mensaje mas llamativo, crea otra plantilla aprobada en Meta y pon su nombre en `ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME`.

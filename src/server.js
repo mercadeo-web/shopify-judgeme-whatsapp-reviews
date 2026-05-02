@@ -16,8 +16,11 @@ const WHATSAPP_REVIEW_LINK_IN_BUTTON = String(env.WHATSAPP_REVIEW_LINK_IN_BUTTON
 const DEFAULT_COUNTRY_CODE = String(env.DEFAULT_COUNTRY_CODE || "507").replace(/\D/g, "");
 const PUBLIC_APP_URL = String(env.PUBLIC_APP_URL || "").replace(/\/$/, "");
 const ABANDONED_CHECKOUT_ENABLED = String(env.ABANDONED_CHECKOUT_ENABLED || "false") === "true";
-const ABANDONED_CHECKOUT_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_DELAY_HOURS || 2);
+const ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES = Number(env.ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES || 20);
+const ABANDONED_CHECKOUT_SECOND_ENABLED = String(env.ABANDONED_CHECKOUT_SECOND_ENABLED || "true") === "true";
+const ABANDONED_CHECKOUT_SECOND_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_SECOND_DELAY_HOURS || 24);
 const ABANDONED_CHECKOUT_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_TEMPLATE_NAME || "";
+const ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME || ABANDONED_CHECKOUT_TEMPLATE_NAME;
 const ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE = env.ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE || env.WHATSAPP_TEMPLATE_LANGUAGE;
 const ABANDONED_CHECKOUT_LINK_IN_BUTTON = String(env.ABANDONED_CHECKOUT_LINK_IN_BUTTON || "true") === "true";
 
@@ -251,17 +254,23 @@ async function handleCheckoutWebhook(checkout, topic) {
   });
 
   const queue = await loadQueue();
-  const taskId = `shopify-checkout-${checkout.id || checkout.token}`;
+  const checkoutKey = String(checkout.id || checkout.token);
+  const taskId = `shopify-checkout-${checkoutKey}-reminder-1`;
   const existing = queue.tasks.find((task) => task.id === taskId);
 
   if (checkout.completed_at) {
-    if (existing && existing.status === "pending") {
-      existing.status = "cancelled";
-      existing.cancelled_at = new Date().toISOString();
-      existing.cancelled_reason = "checkout_completed";
-      await saveQueue(queue);
+    let cancelled = 0;
+    for (const task of queue.tasks) {
+      if (task.type !== "abandoned_checkout") continue;
+      if (task.checkout_key !== checkoutKey) continue;
+      if (task.status !== "pending") continue;
+      task.status = "cancelled";
+      task.cancelled_at = new Date().toISOString();
+      task.cancelled_reason = "checkout_completed";
+      cancelled += 1;
     }
-    return { ok: true, cancelled: Boolean(existing) };
+    if (cancelled > 0) await saveQueue(queue);
+    return { ok: true, cancelled };
   }
 
   const task = buildAbandonedCheckoutTask(checkout);
@@ -309,6 +318,7 @@ function buildAbandonedCheckoutTask(checkout) {
   if (!phone) return null;
   if (!checkout.abandoned_checkout_url) return null;
 
+  const checkoutKey = String(checkout.id || checkout.token);
   const recoveryToken = crypto.randomBytes(16).toString("hex");
   const customerName =
     checkout.shipping_address?.first_name ||
@@ -317,13 +327,16 @@ function buildAbandonedCheckoutTask(checkout) {
     "gracias";
 
   const orderValue = formatCheckoutValue(checkout);
-  const sendAt = new Date(Date.now() + ABANDONED_CHECKOUT_DELAY_HOURS * 60 * 60 * 1000);
+  const sendAt = new Date(Date.now() + ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES * 60 * 1000);
 
   return {
-    id: `shopify-checkout-${checkout.id || checkout.token}`,
+    id: `shopify-checkout-${checkoutKey}-reminder-1`,
     type: "abandoned_checkout",
+    checkout_key: checkoutKey,
     checkout_id: checkout.id || null,
     checkout_token: checkout.token || null,
+    reminder_attempt: 1,
+    template_name: ABANDONED_CHECKOUT_TEMPLATE_NAME,
     recovery_token: recoveryToken,
     recovery_url: checkout.abandoned_checkout_url,
     customer_name: customerName,
@@ -434,6 +447,7 @@ async function processQueue() {
       task.status = "sent";
       task.sent_at = new Date().toISOString();
       task.whatsapp_response = result;
+      scheduleNextAbandonedCheckoutReminder(queue, task);
       console.log("Sent WhatsApp request", {
         type: task.type || "review_request",
         order_id: task.order_id,
@@ -457,6 +471,30 @@ async function processQueue() {
   }
 
   if (changed) await saveQueue(queue);
+}
+
+function scheduleNextAbandonedCheckoutReminder(queue, task) {
+  if (task.type !== "abandoned_checkout") return;
+  if (task.reminder_attempt !== 1) return;
+  if (!ABANDONED_CHECKOUT_SECOND_ENABLED) return;
+
+  const checkoutKey = task.checkout_key || String(task.checkout_id || task.checkout_token);
+  const secondTaskId = `shopify-checkout-${checkoutKey}-reminder-2`;
+  if (queue.tasks.some((item) => item.id === secondTaskId)) return;
+
+  queue.tasks.push({
+    ...task,
+    id: secondTaskId,
+    reminder_attempt: 2,
+    template_name: ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME,
+    send_at: new Date(Date.now() + ABANDONED_CHECKOUT_SECOND_DELAY_HOURS * 60 * 60 * 1000).toISOString(),
+    status: "pending",
+    created_at: new Date().toISOString(),
+    sent_at: undefined,
+    failed_at: undefined,
+    error: undefined,
+    whatsapp_response: undefined
+  });
 }
 
 async function sendQueuedWhatsAppMessage(task) {
@@ -511,7 +549,7 @@ async function sendWhatsAppAbandonedCheckoutReminder(task) {
     to: task.to,
     type: "template",
     template: {
-      name: ABANDONED_CHECKOUT_TEMPLATE_NAME,
+      name: task.template_name || ABANDONED_CHECKOUT_TEMPLATE_NAME,
       language: { code: ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE },
       components: buildAbandonedCheckoutTemplateComponents(task)
     }
