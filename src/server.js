@@ -14,6 +14,12 @@ const REQUIRE_FULFILLED_ITEMS = String(env.REQUIRE_FULFILLED_ITEMS || "true") ==
 const PERSONALIZE_LINK_BY_PRODUCT = String(env.PERSONALIZE_LINK_BY_PRODUCT || "true") === "true";
 const WHATSAPP_REVIEW_LINK_IN_BUTTON = String(env.WHATSAPP_REVIEW_LINK_IN_BUTTON || "false") === "true";
 const DEFAULT_COUNTRY_CODE = String(env.DEFAULT_COUNTRY_CODE || "507").replace(/\D/g, "");
+const PUBLIC_APP_URL = String(env.PUBLIC_APP_URL || "").replace(/\/$/, "");
+const ABANDONED_CHECKOUT_ENABLED = String(env.ABANDONED_CHECKOUT_ENABLED || "false") === "true";
+const ABANDONED_CHECKOUT_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_DELAY_HOURS || 2);
+const ABANDONED_CHECKOUT_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_TEMPLATE_NAME || "";
+const ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE = env.ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE || env.WHATSAPP_TEMPLATE_LANGUAGE;
+const ABANDONED_CHECKOUT_LINK_IN_BUTTON = String(env.ABANDONED_CHECKOUT_LINK_IN_BUTTON || "true") === "true";
 
 const requiredEnv = [
   "SHOPIFY_WEBHOOK_SECRET",
@@ -36,6 +42,19 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
       return json(res, 200, { ok: true });
+    }
+
+    if (req.method === "GET" && req.url?.startsWith("/recover")) {
+      const requestUrl = new URL(req.url, PUBLIC_APP_URL || `http://${req.headers.host}`);
+      const token = requestUrl.searchParams.get("token");
+      const recoveryUrl = await findRecoveryUrl(token);
+
+      if (!recoveryUrl) {
+        return json(res, 404, { error: "Recovery link not found" });
+      }
+
+      res.writeHead(302, { Location: recoveryUrl });
+      return res.end();
     }
 
     if (req.method === "POST" && req.url === "/webhooks/shopify/orders-fulfilled") {
@@ -88,6 +107,22 @@ const server = createServer(async (req, res) => {
       });
 
       return json(res, 202, { ok: true, scheduled_for: task.send_at });
+    }
+
+    if (req.method === "POST" && req.url === "/webhooks/shopify/checkouts-update") {
+      const rawBody = await readRawBody(req);
+      if (!isValidShopifyWebhook(req, rawBody)) {
+        console.error("Rejected Shopify checkout webhook", {
+          topic: req.headers["x-shopify-topic"],
+          reason: "invalid_signature",
+          body_size: rawBody.length
+        });
+        return json(res, 401, { error: "Invalid Shopify webhook signature" });
+      }
+
+      const checkout = JSON.parse(rawBody.toString("utf8"));
+      const result = await handleCheckoutWebhook(checkout, req.headers["x-shopify-topic"]);
+      return json(res, 202, result);
     }
 
     return json(res, 404, { error: "Not found" });
@@ -206,6 +241,129 @@ function buildReviewRequestTask(order) {
   };
 }
 
+async function handleCheckoutWebhook(checkout, topic) {
+  console.log("Received Shopify checkout webhook", {
+    topic,
+    checkout_id: checkout.id,
+    has_phone: Boolean(checkout.phone || checkout.shipping_address?.phone || checkout.billing_address?.phone),
+    completed_at: checkout.completed_at || null,
+    total_price: checkout.total_price || checkout.total_line_items_price || null
+  });
+
+  const queue = await loadQueue();
+  const taskId = `shopify-checkout-${checkout.id || checkout.token}`;
+  const existing = queue.tasks.find((task) => task.id === taskId);
+
+  if (checkout.completed_at) {
+    if (existing && existing.status === "pending") {
+      existing.status = "cancelled";
+      existing.cancelled_at = new Date().toISOString();
+      existing.cancelled_reason = "checkout_completed";
+      await saveQueue(queue);
+    }
+    return { ok: true, cancelled: Boolean(existing) };
+  }
+
+  const task = buildAbandonedCheckoutTask(checkout);
+  if (!task) {
+    console.log("Skipped Shopify checkout webhook", {
+      topic,
+      checkout_id: checkout.id,
+      reason: getCheckoutSkipReason(checkout)
+    });
+    return { ok: true, skipped: true };
+  }
+
+  if (existing && existing.status !== "pending") {
+    return { ok: true, duplicate: true, status: existing.status };
+  }
+
+  if (existing) {
+    Object.assign(existing, task, {
+      created_at: existing.created_at,
+      updated_at: new Date().toISOString()
+    });
+  } else {
+    queue.tasks.push(task);
+  }
+
+  await saveQueue(queue);
+  console.log("Scheduled abandoned checkout reminder", {
+    checkout_id: checkout.id,
+    to: maskPhone(task.to),
+    send_at: task.send_at
+  });
+
+  return { ok: true, scheduled_for: task.send_at };
+}
+
+function buildAbandonedCheckoutTask(checkout) {
+  if (!ABANDONED_CHECKOUT_ENABLED) return null;
+
+  const phone = normalizePhone(
+    checkout.phone ||
+      checkout.shipping_address?.phone ||
+      checkout.billing_address?.phone
+  );
+
+  if (!phone) return null;
+  if (!checkout.abandoned_checkout_url) return null;
+
+  const recoveryToken = crypto.randomBytes(16).toString("hex");
+  const customerName =
+    checkout.shipping_address?.first_name ||
+    checkout.billing_address?.first_name ||
+    checkout.customer?.first_name ||
+    "gracias";
+
+  const orderValue = formatCheckoutValue(checkout);
+  const sendAt = new Date(Date.now() + ABANDONED_CHECKOUT_DELAY_HOURS * 60 * 60 * 1000);
+
+  return {
+    id: `shopify-checkout-${checkout.id || checkout.token}`,
+    type: "abandoned_checkout",
+    checkout_id: checkout.id || null,
+    checkout_token: checkout.token || null,
+    recovery_token: recoveryToken,
+    recovery_url: checkout.abandoned_checkout_url,
+    customer_name: customerName,
+    order_value: orderValue,
+    to: phone,
+    send_at: sendAt.toISOString(),
+    status: "pending",
+    created_at: new Date().toISOString()
+  };
+}
+
+function getCheckoutSkipReason(checkout) {
+  const phone = normalizePhone(
+    checkout.phone ||
+      checkout.shipping_address?.phone ||
+      checkout.billing_address?.phone
+  );
+
+  if (!ABANDONED_CHECKOUT_ENABLED) return "abandoned_checkout_disabled";
+  if (!phone) return "missing_phone";
+  if (!checkout.abandoned_checkout_url) return "missing_recovery_url";
+  return "unknown";
+}
+
+function formatCheckoutValue(checkout) {
+  const amount = checkout.total_price || checkout.total_line_items_price || checkout.subtotal_price || "";
+  const currency = checkout.presentment_currency || checkout.currency || "";
+  return [currency, amount].filter(Boolean).join(" ") || "tu compra";
+}
+
+async function findRecoveryUrl(token) {
+  if (!token) return "";
+  const queue = await loadQueue();
+  const task = queue.tasks.find((item) => {
+    return item.type === "abandoned_checkout" && item.recovery_token === token;
+  });
+
+  return task?.recovery_url || "";
+}
+
 function getSkipReason(order) {
   const rawPhone =
     order.shipping_address?.phone ||
@@ -272,20 +430,24 @@ async function processQueue() {
     if (new Date(task.send_at).getTime() > now) continue;
 
     try {
-      const result = await sendWhatsAppReviewRequest(task);
+      const result = await sendQueuedWhatsAppMessage(task);
       task.status = "sent";
       task.sent_at = new Date().toISOString();
       task.whatsapp_response = result;
-      console.log("Sent WhatsApp review request", {
+      console.log("Sent WhatsApp request", {
+        type: task.type || "review_request",
         order_id: task.order_id,
+        checkout_id: task.checkout_id,
         to: maskPhone(task.to)
       });
     } catch (error) {
       task.status = "failed";
       task.failed_at = new Date().toISOString();
       task.error = error.message;
-      console.error("Failed WhatsApp review request", {
+      console.error("Failed WhatsApp request", {
+        type: task.type || "review_request",
         order_id: task.order_id,
+        checkout_id: task.checkout_id,
         to: maskPhone(task.to),
         error: error.message
       });
@@ -295,6 +457,14 @@ async function processQueue() {
   }
 
   if (changed) await saveQueue(queue);
+}
+
+async function sendQueuedWhatsAppMessage(task) {
+  if (task.type === "abandoned_checkout") {
+    return sendWhatsAppAbandonedCheckoutReminder(task);
+  }
+
+  return sendWhatsAppReviewRequest(task);
 }
 
 async function sendWhatsAppReviewRequest(task) {
@@ -310,6 +480,40 @@ async function sendWhatsAppReviewRequest(task) {
       name: env.WHATSAPP_TEMPLATE_NAME,
       language: { code: env.WHATSAPP_TEMPLATE_LANGUAGE },
       components: buildWhatsAppTemplateComponents(task)
+    }
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(`WhatsApp API error ${response.status}: ${JSON.stringify(body)}`);
+  }
+
+  return body;
+}
+
+async function sendWhatsAppAbandonedCheckoutReminder(task) {
+  const graphVersion = env.WHATSAPP_GRAPH_VERSION || "v24.0";
+  const url = `https://graph.facebook.com/${graphVersion}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: task.to,
+    type: "template",
+    template: {
+      name: ABANDONED_CHECKOUT_TEMPLATE_NAME,
+      language: { code: ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE },
+      components: buildAbandonedCheckoutTemplateComponents(task)
     }
   };
 
@@ -360,6 +564,32 @@ function buildWhatsAppTemplateComponents(task) {
       sub_type: "url",
       index: "0",
       parameters: [{ type: "text", text: String(task.product_id || "") }]
+    }
+  ];
+}
+
+function buildAbandonedCheckoutTemplateComponents(task) {
+  const body = {
+    type: "body",
+    parameters: [
+      { type: "text", text: task.customer_name },
+      { type: "text", text: task.order_value }
+    ]
+  };
+
+  if (!ABANDONED_CHECKOUT_LINK_IN_BUTTON) {
+    const recoveryLink = `${PUBLIC_APP_URL}/recover?token=${task.recovery_token}`;
+    body.parameters.push({ type: "text", text: recoveryLink });
+    return [body];
+  }
+
+  return [
+    body,
+    {
+      type: "button",
+      sub_type: "url",
+      index: "0",
+      parameters: [{ type: "text", text: task.recovery_token }]
     }
   ];
 }

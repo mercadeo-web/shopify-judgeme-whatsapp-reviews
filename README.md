@@ -90,3 +90,35 @@ Tambien puedes usar el mismo endpoint con eventos de fulfillment si tu tienda tr
 ## Nota importante
 
 WhatsApp exige consentimiento/opt-in del cliente para mensajes iniciados por el negocio y plantillas aprobadas para conversaciones fuera de la ventana de 24 horas. Asegurate de que tu checkout o politicas recojan ese permiso.
+
+## Carrito/pedido abandonado
+
+La misma app puede recibir webhooks de `Checkout update` desde Shopify y enviar una plantilla de WhatsApp con un boton para recuperar la compra.
+
+Webhook:
+
+```text
+https://TU-DOMINIO.com/webhooks/shopify/checkouts-update
+```
+
+Plantilla sugerida:
+
+```text
+Hola {{1}},
+
+Tu pedido de {{2}} en El Lector aun no se ha realizado.
+
+Da clic en el boton para completar el pago y confirmar tu pedido.
+```
+
+Boton URL dinamico:
+
+```text
+https://TU-DOMINIO.com/recover?token={{1}}
+```
+
+Variables:
+
+1. Nombre del cliente.
+2. Valor del pedido.
+3. Boton: token interno de recuperacion.
