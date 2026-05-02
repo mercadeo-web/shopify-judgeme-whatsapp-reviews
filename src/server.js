@@ -13,6 +13,7 @@ const SEND_DELAY_DAYS = Number(env.SEND_DELAY_DAYS || 7);
 const REQUIRE_FULFILLED_ITEMS = String(env.REQUIRE_FULFILLED_ITEMS || "true") === "true";
 const PERSONALIZE_LINK_BY_PRODUCT = String(env.PERSONALIZE_LINK_BY_PRODUCT || "true") === "true";
 const WHATSAPP_REVIEW_LINK_IN_BUTTON = String(env.WHATSAPP_REVIEW_LINK_IN_BUTTON || "false") === "true";
+const DEFAULT_COUNTRY_CODE = String(env.DEFAULT_COUNTRY_CODE || "507").replace(/\D/g, "");
 
 const requiredEnv = [
   "SHOPIFY_WEBHOOK_SECRET",
@@ -47,6 +48,11 @@ const server = createServer(async (req, res) => {
       const task = buildReviewRequestTask(order);
 
       if (!task) {
+        console.log("Skipped Shopify webhook", {
+          topic: req.headers["x-shopify-topic"],
+          order_id: order.id,
+          reason: getSkipReason(order)
+        });
         return json(res, 202, { ok: true, skipped: true });
       }
 
@@ -57,6 +63,12 @@ const server = createServer(async (req, res) => {
 
       queue.tasks.push(task);
       await saveQueue(queue);
+      console.log("Scheduled review request", {
+        order_id: task.order_id,
+        product_id: task.product_id,
+        to: maskPhone(task.to),
+        send_at: task.send_at
+      });
 
       return json(res, 202, { ok: true, scheduled_for: task.send_at });
     }
@@ -177,6 +189,26 @@ function buildReviewRequestTask(order) {
   };
 }
 
+function getSkipReason(order) {
+  const rawPhone =
+    order.shipping_address?.phone ||
+    order.billing_address?.phone ||
+    order.customer?.phone ||
+    order.phone;
+
+  if (!normalizePhone(rawPhone)) return "missing_phone";
+
+  const fulfilledItems = (order.line_items || []).filter((item) => {
+    return item.fulfillment_status === "fulfilled" || item.fulfillable_quantity === 0;
+  });
+
+  if (REQUIRE_FULFILLED_ITEMS && fulfilledItems.length === 0) {
+    return "no_fulfilled_line_items";
+  }
+
+  return "unknown";
+}
+
 function buildJudgeMeReviewLink(item) {
   if (!PERSONALIZE_LINK_BY_PRODUCT || !item?.product_id) {
     return env.JUDGEME_REVIEW_LINK;
@@ -195,9 +227,22 @@ function buildJudgeMeReviewLink(item) {
 
 function normalizePhone(value) {
   if (!value) return "";
-  const digits = String(value).replace(/[^\d+]/g, "");
-  if (digits.startsWith("+")) return digits.slice(1);
+  const text = String(value).trim();
+  const digits = text.replace(/\D/g, "");
+
+  if (!digits) return "";
+  if (text.startsWith("+")) return digits;
+
+  if (DEFAULT_COUNTRY_CODE && digits.length === 8) {
+    return `${DEFAULT_COUNTRY_CODE}${digits}`;
+  }
+
   return digits;
+}
+
+function maskPhone(value) {
+  if (!value) return "";
+  return `${value.slice(0, 3)}****${value.slice(-2)}`;
 }
 
 async function processQueue() {
@@ -214,10 +259,19 @@ async function processQueue() {
       task.status = "sent";
       task.sent_at = new Date().toISOString();
       task.whatsapp_response = result;
+      console.log("Sent WhatsApp review request", {
+        order_id: task.order_id,
+        to: maskPhone(task.to)
+      });
     } catch (error) {
       task.status = "failed";
       task.failed_at = new Date().toISOString();
       task.error = error.message;
+      console.error("Failed WhatsApp review request", {
+        order_id: task.order_id,
+        to: maskPhone(task.to),
+        error: error.message
+      });
     }
 
     changed = true;
