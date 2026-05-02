@@ -13,6 +13,7 @@ const SEND_DELAY_DAYS = Number(env.SEND_DELAY_DAYS || 7);
 const REQUIRE_FULFILLED_ITEMS = String(env.REQUIRE_FULFILLED_ITEMS || "true") === "true";
 const PERSONALIZE_LINK_BY_PRODUCT = String(env.PERSONALIZE_LINK_BY_PRODUCT || "true") === "true";
 const WHATSAPP_REVIEW_LINK_IN_BUTTON = String(env.WHATSAPP_REVIEW_LINK_IN_BUTTON || "false") === "true";
+const WHATSAPP_WEBHOOK_VERIFY_TOKEN = env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "";
 const DEFAULT_COUNTRY_CODE = String(env.DEFAULT_COUNTRY_CODE || "507").replace(/\D/g, "");
 const PUBLIC_APP_URL = String(env.PUBLIC_APP_URL || "").replace(/\/$/, "");
 const ABANDONED_CHECKOUT_ENABLED = String(env.ABANDONED_CHECKOUT_ENABLED || "false") === "true";
@@ -44,6 +45,17 @@ await ensureQueue();
 const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === "GET" && req.url?.startsWith("/webhooks/whatsapp")) {
+      return verifyWhatsAppWebhook(req, res);
+    }
+
+    if (req.method === "POST" && req.url === "/webhooks/whatsapp") {
+      const rawBody = await readRawBody(req);
+      const payload = JSON.parse(rawBody.toString("utf8"));
+      logWhatsAppWebhook(payload);
       return json(res, 200, { ok: true });
     }
 
@@ -160,6 +172,48 @@ function loadEnv() {
   }
 
   return values;
+}
+
+function verifyWhatsAppWebhook(req, res) {
+  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+  const mode = requestUrl.searchParams.get("hub.mode");
+  const token = requestUrl.searchParams.get("hub.verify_token");
+  const challenge = requestUrl.searchParams.get("hub.challenge");
+
+  if (mode === "subscribe" && token === WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end(challenge || "");
+  }
+
+  return json(res, 403, { error: "Invalid WhatsApp verify token" });
+}
+
+function logWhatsAppWebhook(payload) {
+  for (const entry of payload.entry || []) {
+    for (const change of entry.changes || []) {
+      const value = change.value || {};
+
+      for (const status of value.statuses || []) {
+        console.log("WhatsApp delivery status", {
+          id: status.id,
+          recipient_id: maskPhone(status.recipient_id || ""),
+          status: status.status,
+          timestamp: status.timestamp,
+          conversation_id: status.conversation?.id,
+          pricing_category: status.pricing?.category,
+          errors: status.errors || []
+        });
+      }
+
+      for (const message of value.messages || []) {
+        console.log("WhatsApp inbound message", {
+          from: maskPhone(message.from || ""),
+          type: message.type,
+          id: message.id
+        });
+      }
+    }
+  }
 }
 
 async function ensureQueue() {

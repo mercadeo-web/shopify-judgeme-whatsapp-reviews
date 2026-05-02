@@ -91,6 +91,28 @@ Tambien puedes usar el mismo endpoint con eventos de fulfillment si tu tienda tr
 
 WhatsApp exige consentimiento/opt-in del cliente para mensajes iniciados por el negocio y plantillas aprobadas para conversaciones fuera de la ventana de 24 horas. Asegurate de que tu checkout o politicas recojan ese permiso.
 
+## Estados de entrega de WhatsApp
+
+Para diagnosticar mensajes aceptados por Meta que no llegan al telefono, configura un webhook de WhatsApp Cloud API:
+
+```text
+https://TU-DOMINIO.com/webhooks/whatsapp
+```
+
+Verify token:
+
+```text
+WHATSAPP_WEBHOOK_VERIFY_TOKEN
+```
+
+Suscribe el campo:
+
+```text
+messages
+```
+
+La app registrara estados como `sent`, `delivered`, `read` o `failed` en los runtime logs.
+
 ## Carrito/pedido abandonado
 
 La misma app puede recibir webhooks de `Checkout update` desde Shopify y enviar una plantilla de WhatsApp con un boton para recuperar la compra. El primer mensaje se agenda 20 minutos despues del abandono. Si el cliente no completa el pago, se agenda un segundo recordatorio 24 horas despues del primer mensaje.
