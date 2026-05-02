@@ -22,6 +22,8 @@ const ABANDONED_CHECKOUT_SECOND_ENABLED = String(env.ABANDONED_CHECKOUT_SECOND_E
 const ABANDONED_CHECKOUT_SECOND_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_SECOND_DELAY_HOURS || 24);
 const ABANDONED_CHECKOUT_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_TEMPLATE_NAME || "";
 const ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME || ABANDONED_CHECKOUT_TEMPLATE_NAME;
+const ABANDONED_CHECKOUT_TEMPLATE_BODY_PARAMS = Number(env.ABANDONED_CHECKOUT_TEMPLATE_BODY_PARAMS || 1);
+const ABANDONED_CHECKOUT_SECOND_TEMPLATE_BODY_PARAMS = Number(env.ABANDONED_CHECKOUT_SECOND_TEMPLATE_BODY_PARAMS || ABANDONED_CHECKOUT_TEMPLATE_BODY_PARAMS);
 const ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE = env.ABANDONED_CHECKOUT_TEMPLATE_LANGUAGE || env.WHATSAPP_TEMPLATE_LANGUAGE;
 const ABANDONED_CHECKOUT_LINK_IN_BUTTON = String(env.ABANDONED_CHECKOUT_LINK_IN_BUTTON || "true") === "true";
 
@@ -392,6 +394,7 @@ function buildAbandonedCheckoutTask(checkout) {
     checkout_token: checkout.token || null,
     reminder_attempt: 1,
     template_name: ABANDONED_CHECKOUT_TEMPLATE_NAME,
+    body_param_count: ABANDONED_CHECKOUT_TEMPLATE_BODY_PARAMS,
     recovery_token: recoveryToken,
     recovery_url: checkout.abandoned_checkout_url,
     customer_name: customerName,
@@ -553,6 +556,7 @@ function scheduleNextAbandonedCheckoutReminder(queue, task) {
     id: secondTaskId,
     reminder_attempt: 2,
     template_name: ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME,
+    body_param_count: ABANDONED_CHECKOUT_SECOND_TEMPLATE_BODY_PARAMS,
     send_at: new Date(Date.now() + ABANDONED_CHECKOUT_SECOND_DELAY_HOURS * 60 * 60 * 1000).toISOString(),
     status: "pending",
     created_at: new Date().toISOString(),
@@ -673,12 +677,14 @@ function buildWhatsAppTemplateComponents(task) {
 }
 
 function buildAbandonedCheckoutTemplateComponents(task) {
+  const bodyParameters = [{ type: "text", text: task.customer_name }];
+  if (Number(task.body_param_count || 1) >= 2) {
+    bodyParameters.push({ type: "text", text: task.order_value });
+  }
+
   const body = {
     type: "body",
-    parameters: [
-      { type: "text", text: task.customer_name },
-      { type: "text", text: task.order_value }
-    ]
+    parameters: bodyParameters
   };
 
   if (!ABANDONED_CHECKOUT_LINK_IN_BUTTON) {
