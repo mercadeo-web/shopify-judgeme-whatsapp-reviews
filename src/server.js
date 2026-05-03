@@ -678,7 +678,7 @@ function buildWhatsAppTemplateComponents(task) {
 
 function buildAbandonedCheckoutTemplateComponents(task) {
   const bodyParameters = [{ type: "text", text: task.customer_name }];
-  if (Number(task.body_param_count || 1) >= 2) {
+  if (getAbandonedCheckoutBodyParamCount(task) >= 2) {
     bodyParameters.push({ type: "text", text: task.order_value });
   }
 
@@ -702,6 +702,14 @@ function buildAbandonedCheckoutTemplateComponents(task) {
       parameters: [{ type: "text", text: task.recovery_token }]
     }
   ];
+}
+
+function getAbandonedCheckoutBodyParamCount(task) {
+  if (task.reminder_attempt === 2) {
+    return ABANDONED_CHECKOUT_SECOND_TEMPLATE_BODY_PARAMS;
+  }
+
+  return ABANDONED_CHECKOUT_TEMPLATE_BODY_PARAMS;
 }
 
 function json(res, status, payload) {
