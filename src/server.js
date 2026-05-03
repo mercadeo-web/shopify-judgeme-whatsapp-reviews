@@ -19,6 +19,7 @@ const PUBLIC_APP_URL = String(env.PUBLIC_APP_URL || "").replace(/\/$/, "");
 const ABANDONED_CHECKOUT_ENABLED = String(env.ABANDONED_CHECKOUT_ENABLED || "false") === "true";
 const ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES = Number(env.ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES || 20);
 const ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES = Number(env.ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES || 10);
+const ABANDONED_CHECKOUT_DEDUPE_WINDOW_HOURS = Number(env.ABANDONED_CHECKOUT_DEDUPE_WINDOW_HOURS || 48);
 const ABANDONED_CHECKOUT_SECOND_ENABLED = String(env.ABANDONED_CHECKOUT_SECOND_ENABLED || "true") === "true";
 const ABANDONED_CHECKOUT_SECOND_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_SECOND_DELAY_HOURS || 24);
 const ABANDONED_CHECKOUT_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_TEMPLATE_NAME || "";
@@ -341,6 +342,16 @@ async function handleCheckoutWebhook(checkout, topic) {
     return { ok: true, skipped: true };
   }
 
+  const duplicate = findRecentAbandonedCheckoutDuplicate(queue, task);
+  if (duplicate && duplicate.id !== task.id) {
+    console.log("Skipped duplicate abandoned checkout reminder", {
+      checkout_id: checkout.id,
+      duplicate_id: duplicate.id,
+      to: maskPhone(task.to)
+    });
+    return { ok: true, duplicate: true, duplicate_id: duplicate.id };
+  }
+
   if (existing && existing.status !== "pending") {
     return { ok: true, duplicate: true, status: existing.status };
   }
@@ -362,6 +373,26 @@ async function handleCheckoutWebhook(checkout, topic) {
   });
 
   return { ok: true, scheduled_for: task.send_at };
+}
+
+function findRecentAbandonedCheckoutDuplicate(queue, task) {
+  const cutoff = Date.now() - ABANDONED_CHECKOUT_DEDUPE_WINDOW_HOURS * 60 * 60 * 1000;
+  const taskCreatedAt = Date.parse(task.created_at || "") || Date.now();
+
+  for (const item of queue.tasks) {
+    if (item.type !== "abandoned_checkout") continue;
+    if (item.reminder_attempt !== 1) continue;
+    if (!["pending", "sent"].includes(item.status)) continue;
+    if (item.to !== task.to) continue;
+    if (item.recovery_url === task.recovery_url) return item;
+
+    const itemCreatedAt = Date.parse(item.created_at || "");
+    if (Number.isFinite(itemCreatedAt) && itemCreatedAt >= cutoff && Math.abs(taskCreatedAt - itemCreatedAt) < 10 * 60 * 1000) {
+      return item;
+    }
+  }
+
+  return null;
 }
 
 function buildAbandonedCheckoutTask(checkout) {
