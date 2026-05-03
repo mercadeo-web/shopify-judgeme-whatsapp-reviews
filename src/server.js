@@ -18,6 +18,7 @@ const DEFAULT_COUNTRY_CODE = String(env.DEFAULT_COUNTRY_CODE || "507").replace(/
 const PUBLIC_APP_URL = String(env.PUBLIC_APP_URL || "").replace(/\/$/, "");
 const ABANDONED_CHECKOUT_ENABLED = String(env.ABANDONED_CHECKOUT_ENABLED || "false") === "true";
 const ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES = Number(env.ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES || 20);
+const ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES = Number(env.ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES || 10);
 const ABANDONED_CHECKOUT_SECOND_ENABLED = String(env.ABANDONED_CHECKOUT_SECOND_ENABLED || "true") === "true";
 const ABANDONED_CHECKOUT_SECOND_DELAY_HOURS = Number(env.ABANDONED_CHECKOUT_SECOND_DELAY_HOURS || 24);
 const ABANDONED_CHECKOUT_TEMPLATE_NAME = env.ABANDONED_CHECKOUT_TEMPLATE_NAME || "";
@@ -384,7 +385,7 @@ function buildAbandonedCheckoutTask(checkout) {
     "gracias";
 
   const orderValue = formatCheckoutValue(checkout);
-  const sendAt = new Date(Date.now() + ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES * 60 * 1000);
+  const sendAt = getAbandonedCheckoutSendAt(checkout);
 
   return {
     id: `shopify-checkout-${checkoutKey}-reminder-1`,
@@ -404,6 +405,18 @@ function buildAbandonedCheckoutTask(checkout) {
     status: "pending",
     created_at: new Date().toISOString()
   };
+}
+
+function getAbandonedCheckoutSendAt(checkout) {
+  const fromNow = Date.now() + ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES * 60 * 1000;
+  const checkoutCreatedAt = Date.parse(checkout.created_at || checkout.createdAt || "");
+
+  if (!Number.isFinite(checkoutCreatedAt)) {
+    return new Date(fromNow);
+  }
+
+  const minimumRecoveryAge = checkoutCreatedAt + ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES * 60 * 1000;
+  return new Date(Math.max(fromNow, minimumRecoveryAge));
 }
 
 function getCheckoutKey(checkout) {

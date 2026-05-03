@@ -149,9 +149,12 @@ Variables de tiempo:
 
 ```env
 ABANDONED_CHECKOUT_FIRST_DELAY_MINUTES=20
+ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES=10
 ABANDONED_CHECKOUT_SECOND_ENABLED=true
 ABANDONED_CHECKOUT_SECOND_DELAY_HOURS=24
 ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME=checkout_abandonado
 ```
 
 Para usar un segundo mensaje mas llamativo, crea otra plantilla aprobada en Meta y pon su nombre en `ABANDONED_CHECKOUT_SECOND_TEMPLATE_NAME`.
+
+Shopify puede redirigir el enlace de recuperacion a la pagina de inicio si se abre demasiado pronto. `ABANDONED_CHECKOUT_MIN_RECOVERY_AGE_MINUTES` evita enviar antes de que el enlace tenga una edad minima.
